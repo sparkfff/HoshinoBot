@@ -1,6 +1,6 @@
-"""本地头像建库，移植自 watermellye/HoshinoBot (ellye)，GPL-3.0。
+"""本地头像建库，移植自 watermellye/arena，GPL-3.0。
 
-https://github.com/watermellye/HoshinoBot/blob/ellye/hoshino/modules/priconne/arena/record.py
+https://github.com/watermellye/arena/blob/master/record.py
 """
 import os
 from pathlib import Path

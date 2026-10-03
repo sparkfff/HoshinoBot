@@ -1,7 +1,7 @@
 """PCR 头像/阵容识别基础，兼容 watermellye 的 old_main 导入路径。
 
-识图算法移植自 watermellye/HoshinoBot 的 ellye 分支：
-https://github.com/watermellye/HoshinoBot/blob/ellye/hoshino/modules/priconne/arena/old_main.py
+识图算法移植自 watermellye/arena：
+https://github.com/watermellye/arena/blob/master/old_main.py
 沿用 HoshinoBot 的 GPL-3.0 许可证。仅保留识图及当前查询接口适配，
 不加载该分支的缓存推荐系统或自动定时任务。
 """

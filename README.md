@@ -78,7 +78,7 @@ Windows 使用 `.\.venv\Scripts\python.exe run.py`，Linux 使用 `.venv/bin/pyt
 
 ### 复用截图识别
 
-识图核心移植自 [watermellye/HoshinoBot 的 ellye 分支](https://github.com/watermellye/HoshinoBot/tree/ellye/hoshino/modules/priconne/arena)，保留 `old_main.py` 的异步接口：
+识图核心移植自 [watermellye/arena](https://github.com/watermellye/arena)，保留 `old_main.py` 的异步接口：
 
 ```python
 from hoshino.modules.priconne.arena.old_main import getBox, getPos, getUnit
