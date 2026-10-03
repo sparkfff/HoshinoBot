@@ -28,12 +28,14 @@ async def whois(bot, ev: CQEvent):
         await bot.finish(ev, f'兰德索尔花名册冷却中(剩余 {int(lmt.left_time(uid)) + 1}秒)', at_sender=True)
 
     lmt.start_cd(uid, 120 if guess else 0)
+    icon = await c.get_icon()
+    result = f'{icon.cqcode} {c.name}' if icon.exist else c.name
     if guess:
         name = filt_message(name)
         msg = f'兰德索尔似乎没有叫"{name}"的人...\n角色别称补全计划: github.com/Ice9Coffee/LandosolRoster'
         await bot.send(ev, msg)
-        msg = f'您有{confi}%的可能在找{guess_name} {await c.get_icon_cqcode()} {c.name}'
+        msg = f'您有{confi}%的可能在找{guess_name} {result}'
         await bot.send(ev, msg)
     else:
-        msg = f'{await c.get_icon_cqcode()} {c.name}'
+        msg = result
         await bot.send(ev, msg, at_sender=True)

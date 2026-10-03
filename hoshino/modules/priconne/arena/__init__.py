@@ -13,6 +13,8 @@ from .. import chara
 
 sv_help = '''
 [怎么拆] 接防守队角色名 查询竞技场解法
+[怎么拆] 接阵容截图 使用本地头像库识别后查询
+[竞技场更新卡池] 超级用户重建本地头像识别库
 [点赞] 接作业id 评价作业
 [点踩] 接作业id 评价作业
 '''.strip()
@@ -27,13 +29,15 @@ aliases_b = tuple('b' + a for a in aliases) + tuple('B' + a for a in aliases)
 aliases_tw = tuple('台' + a for a in aliases)
 aliases_jp = tuple('日' + a for a in aliases)
 
-try:
+def _load_feedback_icons():
+    """绘图时再加载资源，供只使用查询接口的插件独立导入。"""
+    global thumb_up_i, thumb_up_a, thumb_down_i, thumb_down_a
+    if 'thumb_down_a' in globals():
+        return
     thumb_up_i = R.img('priconne/gadget/thumb-up-i.png').open().resize((16, 16), Image.LANCZOS)
     thumb_up_a = R.img('priconne/gadget/thumb-up-a.png').open().resize((16, 16), Image.LANCZOS)
     thumb_down_i = R.img('priconne/gadget/thumb-down-i.png').open().resize((16, 16), Image.LANCZOS)
     thumb_down_a = R.img('priconne/gadget/thumb-down-a.png').open().resize((16, 16), Image.LANCZOS)
-except Exception as e:
-    sv.logger.exception(e)
 
 @sv.on_prefix(aliases)
 async def arena_query(bot, ev):
@@ -53,6 +57,7 @@ async def arena_query_jp(bot, ev):
 
 
 async def render_atk_def_teams(entries, border_pix=5):
+    _load_feedback_icons()
     n = len(entries)
     icon_size = 64
     im = Image.new('RGBA', (5 * icon_size + 100, n * (icon_size + border_pix) - border_pix), (255, 255, 255, 255))
@@ -78,14 +83,21 @@ async def render_atk_def_teams(entries, border_pix=5):
     return im
 
 
-async def _arena_query(bot, ev: CQEvent, region: int):
+async def _arena_query(bot, ev: CQEvent, region: int, _skip_limiter=False):
 
     arena.refresh_quick_key_dic()
     uid = ev.user_id
 
-    if not lmt.check(uid):
-        await bot.finish(ev, '您查询得过于频繁，请稍等片刻', at_sender=True)
-    lmt.start_cd(uid)
+    if not _skip_limiter:
+        if not lmt.check(uid):
+            await bot.finish(ev, '您查询得过于频繁，请稍等片刻', at_sender=True)
+        lmt.start_cd(uid)
+
+    for segment in ev.message:
+        if segment.type == 'image' and segment.data.get('url'):
+            from .old_main import _QueryArenaImageAsync
+            await _QueryArenaImageAsync(segment.data['url'], region, bot, ev)
+            return
 
     # 处理输入数据
     defen = ev.message.extract_plain_text()
@@ -245,3 +257,7 @@ async def _(ss: CommandSession):
     else:
         raise ValueError
     return
+
+
+# 保留识图基础接口；导入时不建库、不下载、不启动定时任务。
+from . import old_main

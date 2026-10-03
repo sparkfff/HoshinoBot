@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import os
 from io import BytesIO
 
 import pygtrie
@@ -15,14 +16,14 @@ from . import _pcr_data
 logger = log.new_logger('chara', hoshino.config.DEBUG)
 UNKNOWN = 1000
 
-try:
-    gadget_equip = R.img('priconne/gadget/equip.png').open()
-    gadget_star = R.img('priconne/gadget/star.png').open()
-    gadget_star_dis = R.img('priconne/gadget/star_disabled.png').open()
-    gadget_star_pink = R.img('priconne/gadget/star_pink.png').open()
-    unknown_chara_icon = R.img(f'priconne/unit/icon_unit_{UNKNOWN}31.png').open()
-except Exception as e:
-    logger.exception(e)
+_render_assets = {}
+
+
+def _get_render_asset(name):
+    """仅在第三方插件需要绘制星级/专武时加载素材。"""
+    if name not in _render_assets:
+        _render_assets[name] = R.img(f'priconne/gadget/{name}.png').open()
+    return _render_assets[name]
 
 
 class Roster:
@@ -116,6 +117,7 @@ async def download_chara_icon(id_, star):
         rsp = await aiorequests.get(url, stream=True, timeout=5)
         if 200 == rsp.status_code:
             img = Image.open(BytesIO(await rsp.content))
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             img.save(save_path)
             logger.info(f'Saved to {save_path}')
             return 0    # ok
@@ -212,20 +214,20 @@ class Chara:
             for i in range(5 if star_slot_verbose else min(self.star, 5)):
                 a = i*(l-star_lap) + margin_x
                 b = size - l - margin_y
-                s = gadget_star if self.star > i else gadget_star_dis
+                s = _get_render_asset('star' if self.star > i else 'star_disabled')
                 s = s.resize((l, l), Image.LANCZOS)
                 pic.paste(s, (a, b, a+l, b+l), s)
             if 6 == self.star:
                 a = 5*(l-star_lap) + margin_x
                 b = size - l - margin_y
-                s = gadget_star_pink
+                s = _get_render_asset('star_pink')
                 s = s.resize((l, l), Image.LANCZOS)
                 pic.paste(s, (a, b, a+l, b+l), s)
         if self.equip:
             l = round(l * 1.5)
             a = margin_x
             b = margin_x
-            s = gadget_equip.resize((l, l), Image.LANCZOS)
+            s = _get_render_asset('equip').resize((l, l), Image.LANCZOS)
             pic.paste(s, (a, b, a+l, b+l), s)
         return pic
 

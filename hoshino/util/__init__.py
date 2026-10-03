@@ -11,7 +11,6 @@ import pytz
 import zhconv
 from aiocqhttp.exceptions import ActionFailed
 from aiocqhttp.message import escape
-from matplotlib import pyplot as plt
 from PIL import Image
 
 import hoshino
@@ -70,7 +69,7 @@ def pic2b64(pic: Image) -> str:
     return 'base64://' + base64_str
 
 
-def fig2b64(plt: plt) -> str:
+def fig2b64(plt) -> str:
     buf = BytesIO()
     plt.savefig(buf, format='PNG', dpi=100)
     base64_str = base64.b64encode(buf.getvalue()).decode()

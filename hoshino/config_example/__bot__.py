@@ -10,7 +10,7 @@ HOST = '127.0.0.1'          # 本地部署使用此条配置（QQ客户端和bot
 
 DEBUG = False               # 调试模式
 
-BLACK_LIST = [1974906693]   # 黑名单，权限为 BLACK = -999
+BLACK_LIST = []             # 黑名单，权限为 BLACK = -999
 WHITE_LIST = []             # 白名单，权限为 WHITE = 51
 SUPERUSERS = [10000]        # 填写超级用户的QQ号，可填多个用半角逗号","隔开，权限为 SUPERUSER = 999
 NICKNAME = ''               # 机器人的昵称。呼叫昵称等同于@bot，可用元组配置多个昵称
@@ -34,14 +34,6 @@ RES_URL = 'http://127.0.0.1:5000/static/'
 # 切忌一次性开启多个
 MODULES_ON = {
     'botmanage',
-    'dice',
-    'groupmaster',
-    # 'hourcall',
-    # 'kancolle',
-    # 'mikan',
-    'pcrclanbattle',
     'priconne',
-    # 'setu',
-    # 'translate',
-    # 'twitter',
+    # 第三方 Hoshino/NoneBot 1 插件放入 hoshino/modules 后，在此添加模块名。
 }
