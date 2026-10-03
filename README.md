@@ -28,14 +28,15 @@
 
 ## 部署
 
-使用 Python 3.9 和独立虚拟环境。框架沿用 NoneBot 1，依赖版本见 `requirements.txt`。
+使用 Python 3.10 和独立虚拟环境。框架沿用 NoneBot 1，依赖版本见 `requirements.txt`；现有依赖已在 Python 3.10 下验证，安装时请保留这些版本约束。
 
 Windows PowerShell：
 
 ```powershell
-git clone https://github.com/sparkfff/HoshinoBot.git
+git clone --branch slim-whois-maintenance https://github.com/sparkfff/HoshinoBot.git
 cd HoshinoBot
-py -3.9 -m venv .venv
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item -Recurse hoshino/config_example hoshino/config
 ```
@@ -43,9 +44,10 @@ Copy-Item -Recurse hoshino/config_example hoshino/config
 Linux：
 
 ```bash
-git clone https://github.com/sparkfff/HoshinoBot.git
+git clone --branch slim-whois-maintenance https://github.com/sparkfff/HoshinoBot.git
 cd HoshinoBot
-python3.9 -m venv .venv
+python3.10 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 cp -r hoshino/config_example hoshino/config
 ```
@@ -58,6 +60,8 @@ MODULES_ON = {
     'priconne',
 }
 ```
+
+从 Python 3.9 升级时，先停止 bot，用 Python 3.10 重新创建虚拟环境并安装依赖，保留现有的 `hoshino/config` 和 `RES_DIR` 资源目录。
 
 Windows 使用 `.\.venv\Scripts\python.exe run.py`，Linux 使用 `.venv/bin/python run.py` 启动。检查启动日志，确认模块加载成功。
 

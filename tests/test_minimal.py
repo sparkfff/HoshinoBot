@@ -80,6 +80,64 @@ class MinimalBotTests(unittest.TestCase):
         import nonebot
         self.assertEqual(nonebot.scheduler.get_jobs(), [])
 
+    def test_server_lifecycle_and_reverse_websocket(self):
+        import nonebot
+
+        async def exercise_server():
+            async with self.bot.asgi.test_app() as app:
+                self.assertIs(self.bot.loop, asyncio.get_running_loop())
+                self.assertTrue(nonebot.scheduler.running)
+                try:
+                    client = app.test_client()
+                    response = await client.post('/', headers={'X-Self-ID': '10000'},
+                        json={'post_type': 'meta_event', 'meta_event_type': 'heartbeat',
+                              'self_id': 10000, 'time': 0, 'status': {}, 'interval': 5000})
+                    self.assertEqual(response.status_code, 204)
+                    async with client.websocket('/ws/', headers={
+                            'X-Self-ID': '10000', 'X-Client-Role': 'Universal'}) as ws:
+                        # Wait for the handshake through an actual API round trip.
+                        await ws.send_json({})
+                        await asyncio.sleep(0)
+                        call = asyncio.create_task(self.bot.get_status(self_id=10000))
+                        try:
+                            request = await asyncio.wait_for(ws.receive_json(), timeout=3)
+                            self.assertEqual(request['action'], 'get_status')
+                            await ws.send_json({'status': 'ok', 'retcode': 0,
+                                                'data': {'online': True},
+                                                'echo': request['echo']})
+                            self.assertEqual(await asyncio.wait_for(call, timeout=3),
+                                             {'online': True})
+                        finally:
+                            if not call.done():
+                                call.cancel()
+                                await asyncio.gather(call, return_exceptions=True)
+                    self.assertEqual(self.bot.get_self_ids(), [])
+                finally:
+                    nonebot.scheduler.shutdown(wait=False)
+                    await asyncio.sleep(0)
+
+        asyncio.run(exercise_server())
+
+    def test_startup_entry_cleans_up_pending_tasks(self):
+        cancelled = []
+
+        async def plugin_task():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+
+        async def serve(**kwargs):
+            asyncio.create_task(plugin_task())
+            await asyncio.sleep(0)
+
+        with patch.object(self.hoshino, 'init', return_value=self.bot), \
+                patch.object(self.bot.asgi, 'run_task', AsyncMock(side_effect=serve)) as run:
+            runpy.run_path(str(ROOT / 'run.py'), run_name='__main__')
+        run.assert_awaited_once_with(host=self.bot.config.HOST, port=self.bot.config.PORT,
+                                     debug=self.bot.config.DEBUG, use_reloader=False)
+        self.assertEqual(cancelled, [True])
+
     def _query(self, text, uid, icon_exists=False):
         from hoshino.msghandler import handle_message
         from hoshino.modules.priconne import chara
