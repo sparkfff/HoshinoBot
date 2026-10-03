@@ -76,33 +76,6 @@ Windows 使用 `.\.venv\Scripts\python.exe run.py`，Linux 使用 `.venv/bin/pyt
 
 保留完整的 `hoshino.modules.priconne.arena` 路径及其查询、反馈和图片渲染接口，供其他插件复用。`hoshino/config/priconne.py` 中的 `arena.AUTH_KEY` 用于竞技场 API；渲染查询结果还需 `RES_DIR/img/priconne/gadget/` 下的点赞图标、角色星级/专武素材以及 `msyh.ttc` 字体。缺素材或字体时返回文字结果。查询接口导入时不加载这些图片。点赞/点踩仅保留接口，不注册命令；未实现的上传命令已移除。
 
-### 复用截图识别
-
-识图核心移植自 [watermellye/arena](https://github.com/watermellye/arena)，保留 `old_main.py` 的异步接口：
-
-```python
-from hoshino.modules.priconne.arena.old_main import getBox, getPos, getUnit
-
-# image / avatar 均为 PIL.Image；需要在 async 函数内调用。
-teams, preview = await getBox(image)  # getPos(image) 与此相同
-uid_6, unit_id, name, score = await getUnit(avatar)
-```
-
-`teams` 是角色 ID 二维列表，例如 `[[1001, 1002, 1003, 1004, 1005]]`；继承原算法的从右往左识别顺序。`preview` 是含两张诊断图片的 CQ 消息字符串。`getUnit` 的 `uid_6` 含星级信息（如 `100131`），`unit_id` 为角色 ID（如 `1001`），分数沿用原算法。没有头像库时分别返回 `([], '')` 和 `(0, 0, 'Unknown', -1)`。
-
-识图计算在工作线程执行，同一进程同时处理一张图片，繁忙时返回提示。远程截图限制为 8 MiB、1200 万像素，并限制并发下载；`getBox`、`getPos`、`getUnit` 同样检查像素上限，直接调用时可能抛出 `ValueError`（包括 `RecognitionBusy`）。新下载头像后运行 `竞技场更新卡池` 刷新进程缓存。
-
-花名册更新只接受 Python 字面量常量，不执行远程代码；先校验并构建新索引，再原子替换数据文件。旧插件的同步 `Chara.icon` 只查询本地资源，需要下载时请改用 `await Chara.get_icon()`。
-
-将头像 PNG 放入 `RES_DIR/img/priconne/unit/`，文件名为 `icon_unit_100131.png` 等六位编号格式。识别首次调用时从本地头像加载，补充图片后由超级用户执行 `竞技场更新卡池`；插件也可调用 `record.update_dic()`。兼容缓存 `dic.npy` 由本地建库生成并被 Git 忽略，识图模块直接读取 PNG，不在启动时读取 pickle、下载图库或加载战绩推荐缓存。头像诊断图使用本地图库，不需要星级/专武素材。
-
-此算法通过边框定位和头像哈希匹配识别4–5人阵容，不是通用 OCR。`怎么拆` 与截图同一条消息发送时会识别后查询；当前竞技场后端只查询完整5人队伍，4人结果可供其他插件直接使用。未引入该分支的多队无冲突推荐或分开发送截图的会话机制。先用实际游戏截图验证识别效果，再用于自动操作。
-
-选择兼容 **Hoshino / NoneBot 1** 的插件，按照插件说明将其放入 `hoshino/modules/<模块名>/`，然后把模块名加入 `hoshino/config/__bot__.py` 的 `MODULES_ON`。如插件需要配置文件，将其放入 `hoshino/config`；使用同一个虚拟环境安装插件声明的额外依赖，并准备所需资源或 API 配置。重启后检查日志，再通过 `lssv` 和 `启用 服务名` 管理各群的服务。
-
-`MODULES_ON` 使用目录模块名，群内启用/禁用命令使用插件注册的 `Service` 名，两者可能不同。被移除的旧内置功能不会仅靠修改配置恢复，需要另行安装相应插件。
-
-NoneBot 2 插件不能直接放入本框架使用，依赖被移除业务模块的 Hoshino 插件也需要适配。保留 `priconne.chara` 等基础接口不代表所有旧插件都兼容；请逐个安装并核对依赖。
 
 ## 来源与许可证
 
