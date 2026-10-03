@@ -71,7 +71,7 @@ Windows 使用 `.\.venv\Scripts\python.exe run.py`，Linux 使用 `.venv/bin/pyt
 
 ## 添加第三方插件
 
-保留完整的 `hoshino.modules.priconne.arena` 路径及其查询、反馈和图片渲染接口，供其他插件复用。`hoshino/config/priconne.py` 中的 `arena.AUTH_KEY` 用于竞技场 API；渲染查询结果还需 `RES_DIR/img/priconne/gadget/` 下的点赞图标、角色星级/专武素材以及 `msyh.ttc` 字体。查询接口导入时不加载这些图片。点赞/点踩命令在上游被注释，上传作业仍为占位实现。
+保留完整的 `hoshino.modules.priconne.arena` 路径及其查询、反馈和图片渲染接口，供其他插件复用。`hoshino/config/priconne.py` 中的 `arena.AUTH_KEY` 用于竞技场 API；渲染查询结果还需 `RES_DIR/img/priconne/gadget/` 下的点赞图标、角色星级/专武素材以及 `msyh.ttc` 字体。缺素材或字体时返回文字结果。查询接口导入时不加载这些图片。点赞/点踩仅保留接口，不注册命令；未实现的上传命令已移除。
 
 ### 复用截图识别
 
@@ -86,6 +86,10 @@ uid_6, unit_id, name, score = await getUnit(avatar)
 ```
 
 `teams` 是角色 ID 二维列表，例如 `[[1001, 1002, 1003, 1004, 1005]]`；继承原算法的从右往左识别顺序。`preview` 是含两张诊断图片的 CQ 消息字符串。`getUnit` 的 `uid_6` 含星级信息（如 `100131`），`unit_id` 为角色 ID（如 `1001`），分数沿用原算法。没有头像库时分别返回 `([], '')` 和 `(0, 0, 'Unknown', -1)`。
+
+识图计算在工作线程执行，同一进程同时处理一张图片，繁忙时返回提示。远程截图限制为 8 MiB、1200 万像素，并限制并发下载；`getBox`、`getPos`、`getUnit` 同样检查像素上限，直接调用时可能抛出 `ValueError`（包括 `RecognitionBusy`）。新下载头像后运行 `竞技场更新卡池` 刷新进程缓存。
+
+花名册更新只接受 Python 字面量常量，不执行远程代码；先校验并构建新索引，再原子替换数据文件。旧插件的同步 `Chara.icon` 只查询本地资源，需要下载时请改用 `await Chara.get_icon()`。
 
 将头像 PNG 放入 `RES_DIR/img/priconne/unit/`，文件名为 `icon_unit_100131.png` 等六位编号格式。识别首次调用时从本地头像加载，补充图片后由超级用户执行 `竞技场更新卡池`；插件也可调用 `record.update_dic()`。兼容缓存 `dic.npy` 由本地建库生成并被 Git 忽略，识图模块直接读取 PNG，不在启动时读取 pickle、下载图库或加载战绩推荐缓存。头像诊断图使用本地图库，不需要星级/专武素材。
 

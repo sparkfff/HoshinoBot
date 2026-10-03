@@ -30,16 +30,11 @@ class PrefixTrigger(BaseTrigger):
 
     def add(self, prefix: str, sf: "ServiceFunc"):
         prefix_cht = zhconv.convert(prefix, "zh-hant")
-        if prefix in self.trie:
-            self.trie[prefix].append(sf)
-            if prefix_cht != prefix:
-                self.trie[prefix_cht].append(sf)
-            hoshino.logger.warning(f"Prefix trigger `{prefix}` added multiple handlers: {sf.__name__}@{sf.sv.name}")
-        else:
-            self.trie[prefix] = [sf]
-            if prefix_cht != prefix:
-                self.trie[prefix_cht] = [sf]
-            hoshino.logger.debug(f"Succeed to add prefix trigger `{prefix}`")
+        for key in dict.fromkeys((prefix, prefix_cht)):
+            handlers = self.trie.setdefault(key, [])
+            if not any(handler is sf for handler in handlers):
+                handlers.append(sf)
+        hoshino.logger.debug(f"Succeed to add prefix trigger `{prefix}`")
 
     def find_handler(self, event: CQEvent) -> Iterable["ServiceFunc"]:
         first_msg_seg = event.message[0]
@@ -71,17 +66,12 @@ class SuffixTrigger(BaseTrigger):
 
     def add(self, suffix: str, sf: "ServiceFunc"):
         suffix_r = suffix[::-1]
-        suffix_r_cht = zhconv.convert(suffix_r, "zh-hant")
-        if suffix_r in self.trie:
-            self.trie[suffix_r].append(sf)
-            if suffix_r_cht != suffix_r:
-                self.trie[suffix_r_cht].append(sf)
-            hoshino.logger.warning(f"Suffix trigger `{suffix}` added multi handler: `{sf.__name__}`")
-        else:
-            self.trie[suffix_r] = [sf]
-            if suffix_r_cht != suffix_r:
-                self.trie[suffix_r_cht] = [sf]
-            hoshino.logger.debug(f"Succeed to add suffix trigger `{suffix}`")
+        suffix_r_cht = zhconv.convert(suffix, "zh-hant")[::-1]
+        for key in dict.fromkeys((suffix_r, suffix_r_cht)):
+            handlers = self.trie.setdefault(key, [])
+            if not any(handler is sf for handler in handlers):
+                handlers.append(sf)
+        hoshino.logger.debug(f"Succeed to add suffix trigger `{suffix}`")
 
     def find_handler(self, event: CQEvent) -> Iterable["ServiceFunc"]:
         last_msg_seg = event.message[-1]

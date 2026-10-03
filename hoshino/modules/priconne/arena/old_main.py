@@ -6,12 +6,17 @@ https://github.com/watermellye/HoshinoBot/blob/ellye/hoshino/modules/priconne/ar
 不加载该分支的缓存推荐系统或自动定时任务。
 """
 import base64
+import asyncio
+from functools import wraps
+import threading
+import time
 from io import BytesIO
 from os.path import dirname, join
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageColor
+import requests
 
 from hoshino import aiorequests, sucmd
 from hoshino.typing import CQEvent, HoshinoBot, Message
@@ -24,6 +29,53 @@ dataDir = join(curpath, 'dic.npy')
 data = {}
 data_processed = None
 _data_loaded = False
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_PIXELS = 12_000_000
+_recognition_lock = threading.Lock()
+_download_slots = threading.BoundedSemaphore(4)
+_worker_state = threading.local()
+
+
+class RecognitionBusy(ValueError):
+    pass
+
+
+def _check_image(image):
+    if image.width * image.height > MAX_IMAGE_PIXELS:
+        raise ValueError('截图超过1200万像素，请裁剪阵容区域后重试')
+
+
+def _in_worker(func):
+    """Keep public async APIs while running the complete CPU task off-loop."""
+    @wraps(func)
+    async def wrapper(image):
+        _check_image(image)
+        if getattr(_worker_state, 'active', False):
+            return await func(image)
+
+        return await _run_recognition(func, image)
+    return wrapper
+
+
+async def _run_recognition(func, *args):
+    if not _recognition_lock.acquire(blocking=False):
+        raise RecognitionBusy('识图正在处理其他图片，请稍后重试')
+
+    def run():
+        try:
+            _worker_state.active = True
+            return asyncio.run(func(*args))
+        finally:
+            _worker_state.active = False
+            _recognition_lock.release()
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Do not let a cancelled caller close the image while its worker uses it.
+        await task
+        raise
 
 
 async def getBox(img):
@@ -37,8 +89,8 @@ async def cut_image(image, hash_size=16):
     :return list[int]
     '''
 
-    image1 = image.resize((hash_size + 1, hash_size), Image.LANCZOS).convert('L')
-    pixel = list(image1.getdata())
+    image1 = image.resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS).convert('L')
+    pixel = np.asarray(image1).ravel().tolist()
     return pixel
 
 
@@ -178,6 +230,7 @@ async def cut(img, border):
     return img
 
 
+@_in_worker
 async def getPos(img: Image):
     '''
     :param img: 待识别图片 PIL.Image
@@ -281,10 +334,10 @@ async def getPos(img: Image):
                         pos_x = 16 + icon_size * col_index
                         pos_y = 16 * (row_index + 1) + icon_size * 2 * row_index
                         x, y, w, h = arr[row_index][4 - col_index]
-                        cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2]).resize((64, 64), Image.LANCZOS)
+                        cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2]).resize((64, 64), Image.Resampling.LANCZOS)
                         compare_img.paste(cropped, (pos_x, pos_y), cropped)  # 要不要加cropped
                         # 对比图直接使用识别库的原图，不依赖星级/专武素材或下载。
-                        icon = Image.fromarray(data[arr_id_6[row_index][4 - col_index]]).convert('RGBA').resize((icon_size, icon_size), Image.LANCZOS)
+                        icon = Image.fromarray(data[arr_id_6[row_index][4 - col_index]]).convert('RGBA').resize((icon_size, icon_size), Image.Resampling.LANCZOS)
                         compare_img.paste(icon, (pos_x, pos_y + 64), icon)
 
                 teams = [team for team in arr_id if team]
@@ -300,7 +353,7 @@ async def getPos(img: Image):
                 outpImg = Image.blend(outpImg, actual_img, 0.2)
                 outpImg.alpha_composite(outpImgText)
                 ratio = max(1, max((outpImg.size)[0], (outpImg.size)[1]) / 500)
-                outpImg = outpImg.resize((int((outpImg.size)[0] / ratio), int((outpImg.size)[1] / ratio)), Image.LANCZOS)
+                outpImg = outpImg.resize((int((outpImg.size)[0] / ratio), int((outpImg.size)[1] / ratio)), Image.Resampling.LANCZOS)
 
                 return teams, f'{outp_b64(outpImg)}\n{outp_b64(compare_img)}'
 
@@ -322,8 +375,9 @@ async def getPos(img: Image):
     return [], ""
 
 
+@_in_worker
 async def getUnit(img2):
-    img2 = img2.convert("RGB").resize((128, 128), Image.LANCZOS)
+    img2 = img2.convert("RGB").resize((128, 128), Image.Resampling.LANCZOS)
     img3 = np.array(img2)
     img4 = img3[25:96, 8:97, :]
     img4 = Image.fromarray(img4)
@@ -353,7 +407,41 @@ async def getUnit(img2):
 
 
 async def get_pic(address: str):
-    return await (await aiorequests.get(address, timeout=6)).content
+    def download():
+        if not _download_slots.acquire(blocking=False):
+            raise RecognitionBusy('图片下载繁忙，请稍后重试')
+        try:
+            return read_response()
+        finally:
+            _download_slots.release()
+
+    def read_response():
+        started = time.monotonic()
+        with requests.get(address, stream=True, timeout=(3, 6)) as response:
+            response.raise_for_status()
+            content_type = response.headers.get('Content-Type', '').split(';')[0]
+            if content_type and not content_type.startswith('image/'):
+                raise ValueError('图片链接未返回图片，请重新发送截图')
+            body = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                if len(body) + len(chunk) > MAX_IMAGE_BYTES:
+                    raise ValueError('截图超过8 MiB，请压缩后重试')
+                if time.monotonic() - started > 15:
+                    raise ValueError('图片下载超时，请重新发送截图')
+                body.extend(chunk)
+            return bytes(body)
+    return await asyncio.to_thread(download)
+
+
+def _decode_image(body):
+    with Image.open(BytesIO(body)) as image:
+        _check_image(image)
+        return image.convert('RGB')
+
+
+async def _recognize_bytes(body):
+    with _decode_image(body) as image:
+        return await getBox(image)
 
 
 async def _QueryArenaTextAsync(text: str, region: int, bot: HoshinoBot, ev: CQEvent):
@@ -365,8 +453,13 @@ async def _QueryArenaTextAsync(text: str, region: int, bot: HoshinoBot, ev: CQEv
 
 
 async def _QueryArenaImageAsync(image_url: str, region: int, bot: HoshinoBot, ev: CQEvent):
-    with Image.open(BytesIO(await get_pic(image_url))) as image:
-        teams, preview = await getBox(image)
+    try:
+        teams, preview = await _run_recognition(_recognize_bytes, await get_pic(image_url))
+    except (requests.RequestException, OSError, ValueError, Image.DecompressionBombError) as exc:
+        sv.logger.warning('截图识别失败：%s', exc)
+        message = str(exc) if isinstance(exc, ValueError) else '图片下载或解码失败，请重新发送有效截图'
+        await bot.send(ev, message, at_sender=True)
+        return
     if not teams or not any(teams):
         await bot.finish(ev, '未识别到阵容，请检查截图及本地头像资源')
     if preview:
@@ -383,4 +476,7 @@ async def _QueryArenaImageAsync(image_url: str, region: int, bot: HoshinoBot, ev
 
 @sucmd('竞技场更新卡池', force_private=False)
 async def _update_dic(bot_session):
-    await bot_session.send(update_dic())
+    def rebuild():
+        with _recognition_lock:
+            return update_dic()
+    await bot_session.send(await asyncio.to_thread(rebuild))

@@ -1,5 +1,6 @@
 import os
 import random
+import tempfile
 
 import hoshino
 from hoshino import Service, aiorequests, priv, sucmd
@@ -29,9 +30,7 @@ async def pull_chara(sess: CommandSession = None):
         rsp = await rsp.text
 
         filename = os.path.join(os.path.dirname(__file__), '_pcr_data.py')
-        with open(filename, 'w', encoding='utf8') as f:
-            f.write(rsp)
-        result = chara.roster.update()
+        result = install_roster_source(rsp, filename)
 
     except Exception as e:
         sv.logger.exception(e)
@@ -43,3 +42,24 @@ async def pull_chara(sess: CommandSession = None):
 
 
 sucmd('update-pcr-chara', force_private=False, aliases=('重载花名册', '更新花名册'))(pull_chara)
+
+
+def install_roster_source(source, filename):
+    """Validate and prepare first; failed writes leave the old disk and trie intact."""
+    values = chara.parse_data_source(source)
+    trie, result = chara.roster.prepare(values)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf8', newline='\n',
+                dir=os.path.dirname(os.path.abspath(filename)), suffix='.tmp', delete=False) as output:
+            temporary = output.name
+            output.write(source)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, filename)
+        temporary = None
+        chara.roster.install(values, trie)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+    return result

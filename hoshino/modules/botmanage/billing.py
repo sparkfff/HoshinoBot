@@ -1,4 +1,5 @@
 import re
+from datetime import date as calendar_date
 import hoshino
 from hoshino import sucmd, HoshinoBot
 from hoshino.typing import CommandSession, CQHttpError, MessageSegment as ms
@@ -7,12 +8,23 @@ from hoshino.typing import CommandSession, CQHttpError, MessageSegment as ms
 async def billing(session: CommandSession):
     bot = session.bot
     args = session.current_arg_text.split()
+    if not args or len(args) % 2:
+        await session.finish('用法：billing 群号 YYYY-MM-DD [群号 YYYY-MM-DD ...]')
+        return
     try:
         for i in range(0, len(args), 2):
             args[i] = int(args[i])
-            assert re.fullmatch(r'\d{4}-\d{2}-\d{2}', args[i + 1]), f"{args[i + 1]}不是合法日期"
-    except (ValueError, AssertionError) as e:
+            if args[i] <= 0:
+                raise ValueError('群号必须为正整数')
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', args[i + 1]):
+                raise ValueError(f"{args[i + 1]}不是合法日期（YYYY-MM-DD）")
+            try:
+                calendar_date.fromisoformat(args[i + 1])
+            except ValueError:
+                raise ValueError(f"{args[i + 1]}不是合法日期") from None
+    except ValueError as e:
         await session.finish(str(e))
+        return
 
     try:
         sid_group = {}
@@ -21,6 +33,7 @@ async def billing(session: CommandSession):
             sid_group[sid] = [g['group_id'] for g in gs]
     except CQHttpError as e:
         await session.finish(str(e))
+        return
 
     failed = []
     not_found = []

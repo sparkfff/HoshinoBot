@@ -1,5 +1,7 @@
 import base64
+import binascii
 import os
+import re
 import time
 
 from hoshino import aiorequests, config
@@ -44,6 +46,7 @@ def dump_db():
             "like": list(DB[k].get("like", set())),
             "dislike": list(DB[k].get("dislike", set())),
         }
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with open(DB_PATH, "w", encoding="utf8") as f:
         json.dump(j, f, ensure_ascii=False)
 
@@ -104,14 +107,51 @@ def get_true_id(quick_key: str, user_id: int) -> str:
     mask = user_id & 0xFFFFFF
     if not isinstance(quick_key, str) or len(quick_key) != 5:
         return None
-    qkey = (quick_key + "===").encode()
-    qkey = int.from_bytes(base64.b32decode(qkey, casefold=True, map01=b"I"), "little")
+    try:
+        qkey = (quick_key + "===").encode()
+        qkey = int.from_bytes(base64.b32decode(qkey, casefold=True, map01=b"I"), "little")
+    except (binascii.Error, ValueError):
+        return None
     qkey ^= mask
     return quick_key_dic.get(qkey, None)
 
 
 def __get_auth_key():
     return config.priconne.arena.AUTH_KEY
+
+
+class ArenaResponseError(ValueError):
+    """The service returned an invalid arena result instead of usable data."""
+
+
+def _validate_results(res):
+    if not isinstance(res, dict) or type(res.get('code')) is not int:
+        raise ArenaResponseError('Invalid response code')
+    if res['code']:
+        raise aiorequests.HTTPError(response=res)
+    data = res.get('data')
+    if not isinstance(data, dict) or not isinstance(data.get('result'), list):
+        raise ArenaResponseError('Invalid result list')
+    results = data['result']
+    for entry in results:
+        if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) \
+                or not re.fullmatch(r'[0-9a-fA-F]{6,128}', entry['id']):
+            raise ArenaResponseError('Invalid entry id')
+        for key in ('up', 'down'):
+            if type(entry.get(key)) is not int or entry[key] < 0:
+                raise ArenaResponseError('Invalid vote count')
+        for key in ('atk', 'def'):
+            team = entry.get(key)
+            if not isinstance(team, list) or len(team) > 5 or (key == 'atk' and not team):
+                raise ArenaResponseError('Invalid team')
+            for unit in team:
+                if not isinstance(unit, dict) or type(unit.get('id')) is not int \
+                        or unit['id'] <= 0 or type(unit.get('star')) is not int \
+                        or not 0 <= unit['star'] <= 6 \
+                        or type(unit.get('equip')) not in (int, bool) \
+                        or unit['equip'] not in (0, 1):
+                    raise ArenaResponseError('Invalid character')
+    return results
 
 
 async def do_query(id_list, user_id, region=1):
@@ -137,19 +177,14 @@ async def do_query(id_list, user_id, region=1):
             json=payload,
             timeout=10,
         )
+        if hasattr(resp, 'raise_for_status'):
+            resp.raise_for_status()
         res = await resp.json()
-        logger.debug(f"len(res)={len(res)}")
     except Exception as e:
         logger.exception(e)
         return None
 
-    if res["code"]:
-        logger.error(f"Arena query failed.\nResponse={res}\nPayload={payload}")
-        raise aiorequests.HTTPError(response=res)
-
-    result = res.get("data", {}).get("result")
-    if result is None:
-        return None
+    result = _validate_results(res)
     ret = []
     for entry in result:
         eid = entry["id"]
