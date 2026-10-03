@@ -34,7 +34,7 @@
 Windows PowerShell：
 
 ```powershell
-git clone --branch slim-whois-maintenance https://github.com/sparkfff/HoshinoBot.git
+git clone https://github.com/sparkfff/HoshinoBot.git
 cd HoshinoBot
 py -3.10 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
@@ -45,7 +45,7 @@ Copy-Item -Recurse hoshino/config_example hoshino/config
 Linux：
 
 ```bash
-git clone --branch slim-whois-maintenance https://github.com/sparkfff/HoshinoBot.git
+git clone https://github.com/sparkfff/HoshinoBot.git
 cd HoshinoBot
 python3.10 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
