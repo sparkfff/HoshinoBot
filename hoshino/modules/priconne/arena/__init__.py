@@ -1,20 +1,17 @@
 import re
-import time
-import asyncio
-from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 import hoshino
 from hoshino import Service, R
 from hoshino.typing import *
-from hoshino.util import FreqLimiter, concat_pic, pic2b64, silence, filt_message
+from hoshino.util import FreqLimiter, pic2b64, filt_message
 
 from .. import chara
 
 sv_help = '''
 [怎么拆] 接防守队角色名 查询竞技场解法
-[点赞] 接作业id 评价作业
-[点踩] 接作业id 评价作业
+[怎么拆] 接阵容截图 使用本地头像库识别后查询
+[竞技场更新卡池] 超级用户重建本地头像识别库
 '''.strip()
 sv = Service('pcr-arena', help_=sv_help, bundle='pcr查询')
 
@@ -27,13 +24,15 @@ aliases_b = tuple('b' + a for a in aliases) + tuple('B' + a for a in aliases)
 aliases_tw = tuple('台' + a for a in aliases)
 aliases_jp = tuple('日' + a for a in aliases)
 
-try:
-    thumb_up_i = R.img('priconne/gadget/thumb-up-i.png').open().resize((16, 16), Image.LANCZOS)
-    thumb_up_a = R.img('priconne/gadget/thumb-up-a.png').open().resize((16, 16), Image.LANCZOS)
-    thumb_down_i = R.img('priconne/gadget/thumb-down-i.png').open().resize((16, 16), Image.LANCZOS)
-    thumb_down_a = R.img('priconne/gadget/thumb-down-a.png').open().resize((16, 16), Image.LANCZOS)
-except Exception as e:
-    sv.logger.exception(e)
+def _load_feedback_icons():
+    """绘图时再加载资源，供只使用查询接口的插件独立导入。"""
+    global thumb_up_i, thumb_up_a, thumb_down_i, thumb_down_a
+    if 'thumb_down_a' in globals():
+        return
+    thumb_up_i = R.img('priconne/gadget/thumb-up-i.png').open().resize((16, 16), Image.Resampling.LANCZOS)
+    thumb_up_a = R.img('priconne/gadget/thumb-up-a.png').open().resize((16, 16), Image.Resampling.LANCZOS)
+    thumb_down_i = R.img('priconne/gadget/thumb-down-i.png').open().resize((16, 16), Image.Resampling.LANCZOS)
+    thumb_down_a = R.img('priconne/gadget/thumb-down-a.png').open().resize((16, 16), Image.Resampling.LANCZOS)
 
 @sv.on_prefix(aliases)
 async def arena_query(bot, ev):
@@ -53,6 +52,7 @@ async def arena_query_jp(bot, ev):
 
 
 async def render_atk_def_teams(entries, border_pix=5):
+    _load_feedback_icons()
     n = len(entries)
     icon_size = 64
     im = Image.new('RGBA', (5 * icon_size + 100, n * (icon_size + border_pix) - border_pix), (255, 255, 255, 255))
@@ -78,14 +78,21 @@ async def render_atk_def_teams(entries, border_pix=5):
     return im
 
 
-async def _arena_query(bot, ev: CQEvent, region: int):
+async def _arena_query(bot, ev: CQEvent, region: int, _skip_limiter=False):
 
     arena.refresh_quick_key_dic()
     uid = ev.user_id
 
-    if not lmt.check(uid):
-        await bot.finish(ev, '您查询得过于频繁，请稍等片刻', at_sender=True)
-    lmt.start_cd(uid)
+    if not _skip_limiter:
+        if not lmt.check(uid):
+            await bot.finish(ev, '您查询得过于频繁，请稍等片刻', at_sender=True)
+        lmt.start_cd(uid)
+
+    for segment in ev.message:
+        if segment.type == 'image' and segment.data.get('url'):
+            from .old_main import _QueryArenaImageAsync
+            await _QueryArenaImageAsync(segment.data['url'], region, bot, ev)
+            return
 
     # 处理输入数据
     defen = ev.message.extract_plain_text()
@@ -118,11 +125,15 @@ async def _arena_query(bot, ev: CQEvent, region: int):
     try:
         res = await arena.do_query(defen, uid, region)
     except hoshino.aiorequests.HTTPError as e:
-        code = e.response["code"]
+        response = e.response
+        code = response.get('code') if isinstance(response, dict) else None
         if code == 117 or code == -429:
             await bot.finish(ev, "高峰期服务器限流！请前往pcrdfans.com/battle")
         else:
-            await bot.finish(ev, f'code{code} 查询出错，请联系维护组调教\n请先前往pcrdfans.com进行查询', at_sender=True)
+            await bot.finish(ev, '竞技场服务暂时无法查询，请稍后重试或前往pcrdfans.com', at_sender=True)
+    except (arena.ArenaResponseError, TypeError, ValueError) as e:
+        sv.logger.warning(f'Arena returned unusable data: {e}')
+        await bot.finish(ev, '竞技场服务返回的数据无法解析，请稍后重试或前往pcrdfans.com', at_sender=True)
     sv.logger.info('Got response!')
 
     # 处理查询结果
@@ -134,32 +145,25 @@ async def _arena_query(bot, ev: CQEvent, region: int):
 
     # 发送回复
     sv.logger.info('Arena generating picture...')
-    teams = await render_atk_def_teams(res)
-    teams = pic2b64(teams)
-    teams = MessageSegment.image(teams)
+    try:
+        teams = await render_atk_def_teams(res)
+        teams = str(MessageSegment.image(pic2b64(teams)))
+    except Exception as e:
+        sv.logger.warning(f'Arena image rendering failed; using text: {e}')
+        teams = '图片资源不可用，以下为文字结果：\n' + '\n'.join(
+            f"{i}. " + ' '.join(
+                f"{c.name}{c.star if c.star else ''}{'专' if c.equip else ''}"
+                for c in entry['atk']) + f"（赞{entry['up']}，踩{entry['down']}）"
+            for i, entry in enumerate(res, 1))
     sv.logger.info('Arena picture ready!')
-    # 纯文字版
-    # atk_team = '\n'.join(map(lambda entry: ' '.join(map(lambda x: f"{x.name}{x.star if x.star else ''}{'专' if x.equip else ''}" , entry['atk'])) , res))
-
-    # details = [" ".join([
-    #     f"赞{e['up']}+{e['my_up']}" if e['my_up'] else f"赞{e['up']}",
-    #     f"踩{e['down']}+{e['my_down']}" if e['my_down'] else f"踩{e['down']}",
-    #     e['qkey'],
-    #     "你赞过" if e['user_like'] > 0 else "你踩过" if e['user_like'] < 0 else ""
-    # ]) for e in res]
-
     defen = [ chara.fromid(x).name for x in defen ]
     defen = f"防守方【{' '.join(defen)}】"
     at = str(MessageSegment.at(ev.user_id))
 
     msg = [
         defen,
-        # at,
         f'已为骑士{at}查询到以下进攻方案：',
-        str(teams),
-        # '作业评价：',
-        # *details,
-        # '※发送"点赞/点踩"可进行评价'
+        teams,
     ]
     if region == 1:
         msg.append('※使用"b怎么拆"或"台怎么拆"可按服过滤')
@@ -168,10 +172,6 @@ async def _arena_query(bot, ev: CQEvent, region: int):
     sv.logger.debug('Arena sending result...')
     await bot.send(ev, '\n'.join(msg))
     sv.logger.debug('Arena result sent!')
-
-    if ev.group_id == 1017321923:
-        await silence(ev, 5 * 60)
-
 
 # @sv.on_prefix('点赞')
 async def arena_like(bot, ev):
@@ -195,53 +195,10 @@ async def _arena_feedback(bot, ev: CQEvent, action: int):
         await arena.do_like(qkey, ev.user_id, action)
     except KeyError:
         await bot.finish(ev, '无法找到作业id！您只能评价您最近查询过的作业', at_sender=True)
+    except OSError as e:
+        sv.logger.warning(f'Arena feedback could not be saved: {e}')
+        await bot.finish(ev, '反馈暂时无法保存，请稍后重试', at_sender=True)
     await bot.send(ev, '感谢您的反馈！', at_sender=True)
 
 
-@sv.on_command('arena-upload', aliases=('上传作业', '作业上传', '上傳作業', '作業上傳'))
-async def upload(ss: CommandSession):
-    atk_team = ss.get('atk_team', prompt='请输入进攻队+5个表示星级的数字+5个表示专武的0/1 无需空格')
-    def_team = ss.get('def_team', prompt='请输入防守队+5个表示星级的数字+5个表示专武的0/1 无需空格')
-    if 'pic' not in ss.state:
-        ss.state['pic'] = MessageSegment.image(pic2b64(concat_pic([
-            await chara.gen_team_pic(atk_team),
-            await chara.gen_team_pic(def_team),
-        ])))
-    confirm = ss.get('confirm', prompt=f'{ss.state["pic"]}\n{MessageSegment.at(ss.event.user_id)}确认上传？\n> 确认\n> 取消')
-    # TODO: upload
-    await ss.send('假装上传成功了...')
-
-
-@upload.args_parser
-async def _(ss: CommandSession):
-    if ss.is_first_run:
-        await ss.send('我将帮您上传作业至pcrdfans，作业将注明您的昵称及qq。您可以随时发送"算了"或"取消"终止上传。')
-        await asyncio.sleep(0.5)
-        return
-    arg = ss.current_arg_text.strip()
-    if arg == '算了' or arg == '取消':
-        await ss.finish('已取消上传')
-
-    if ss.current_key.endswith('_team'):
-        if len(arg) < 15:
-            return
-        team, star, equip = arg[:-10], arg[-10:-5], arg[-5:]
-        if not re.fullmatch(r'[1-6]{5}', star):
-            await ss.pause('请依次输入5个数字表示星级，顺序与队伍相同')
-        if not re.fullmatch(r'[01]{5}', equip):
-            await ss.pause('请依次输入5个0/1表示专武，顺序与队伍相同')
-        star = [int(s) for s in star]
-        equip = [int(s) for s in equip]
-        team, unknown = chara.roster.parse_team(team)
-        if unknown:
-            _, name, score = chara.guess_id(unknown)
-            await ss.pause(f'无法识别"{unknown}"' if score < 70 else f'无法识别"{unknown}" 您说的有{score}%可能是{name}')
-        if len(team) != 5:
-            await ss.pause('队伍必须由5个角色组成')
-        ss.state[ss.current_key] = [chara.fromid(team[i], star[i], equip[i]) for i in range(5)]
-    elif ss.current_key == 'confirm':
-        if arg == '确认' or arg == '確認':
-            ss.state[ss.current_key] = True
-    else:
-        raise ValueError
-    return
+from . import old_main

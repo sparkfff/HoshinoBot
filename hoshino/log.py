@@ -1,6 +1,11 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
+
+# Preserve messages in UTF-8 files even on consoles that cannot print Chinese.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='backslashreplace')
 
 os.makedirs('./log', exist_ok=True)
 _error_log_file = os.path.expanduser('./log/error.log')
@@ -9,10 +14,13 @@ _critical_log_file = os.path.expanduser('./log/critical.log')
 formatter = logging.Formatter('[%(asctime)s %(name)s] %(levelname)s: %(message)s')
 default_handler = logging.StreamHandler(sys.stdout)
 default_handler.setFormatter(formatter)
-error_handler = logging.FileHandler(_error_log_file, encoding='utf8')
+# Keep at most 10 MiB in the active file and five historical files per level.
+error_handler = RotatingFileHandler(_error_log_file, maxBytes=10 * 1024 * 1024,
+                                   backupCount=5, encoding='utf8')
 error_handler.setLevel(logging.ERROR)
 error_handler.setFormatter(formatter)
-critical_handler = logging.FileHandler(_critical_log_file, encoding='utf8')
+critical_handler = RotatingFileHandler(_critical_log_file, maxBytes=10 * 1024 * 1024,
+                                      backupCount=5, encoding='utf8')
 critical_handler.setLevel(logging.CRITICAL)
 critical_handler.setFormatter(formatter)
 

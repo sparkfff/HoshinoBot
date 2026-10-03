@@ -10,21 +10,31 @@ from hoshino import util
 
 class ResObj:
     def __init__(self, res_path):
-        res_dir = os.path.expanduser(hoshino.config.RES_DIR)
-        fullpath = os.path.abspath(os.path.join(res_dir, res_path))
-        if not fullpath.startswith(os.path.abspath(res_dir)):
-            raise ValueError('Cannot access outside RESOUCE_DIR')
         self.__path = os.path.normpath(res_path)
+        self._checked_path()
+
+    def _checked_path(self):
+        res_dir = os.path.realpath(os.path.expanduser(hoshino.config.RES_DIR))
+        fullpath = os.path.realpath(os.path.join(res_dir, self.__path))
+        try:
+            contained = os.path.normcase(os.path.commonpath((res_dir, fullpath))) == os.path.normcase(res_dir)
+        except ValueError:
+            contained = False
+        if not contained:
+            raise ValueError('Cannot access outside RESOURCE_DIR')
+        return fullpath
 
     @property
     def url(self):
         """资源文件的url，供Onebot（或其他远程服务）使用"""
-        return urljoin(hoshino.config.RES_URL, pathname2url(self.__path))
+        self._checked_path()
+        relative = os.path.relpath(self.path, os.path.realpath(os.path.expanduser(hoshino.config.RES_DIR)))
+        return urljoin(hoshino.config.RES_URL, pathname2url(relative))
 
     @property
     def path(self):
         """资源文件的路径，供Hoshino内部使用"""
-        return os.path.join(hoshino.config.RES_DIR, self.__path)
+        return self._checked_path()
 
     @property
     def exist(self):
