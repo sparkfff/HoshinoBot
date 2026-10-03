@@ -1,6 +1,8 @@
 import asyncio
 import ast
 import os
+import tempfile
+import threading
 from io import BytesIO
 
 import pygtrie
@@ -158,14 +160,30 @@ async def download_chara_icon(id_, star):
     url = f'https://redive.estertion.win/icon/unit/{id_}{star}1.webp'
     save_path = R.img(f'priconne/unit/icon_unit_{id_}{star}1.png').path
     logger.info(f'Downloading chara icon from {url}')
+    rsp = None
     try:
         rsp = await aiorequests.get(url, stream=True, timeout=5)
         if 200 == rsp.status_code:
-            img = Image.open(BytesIO(await rsp.content))
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            img.save(save_path)
+            body = await rsp.content
+            def save():
+                temporary = None
+                try:
+                    with Image.open(BytesIO(body)) as img:
+                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        with tempfile.NamedTemporaryFile(dir=os.path.dirname(save_path),
+                                suffix='.tmp', delete=False) as output:
+                            temporary = output.name
+                            img.save(output, format='PNG')
+                        os.replace(temporary, save_path)
+                        temporary = None
+                finally:
+                    if temporary is not None:
+                        os.unlink(temporary)
+            await asyncio.to_thread(save)
             logger.info(f'Saved to {save_path}')
             return 0    # ok
+        elif rsp.status_code == 404:
+            return 2    # this star variant does not exist
         else:
             logger.error(f'Failed to download {url}. HTTP {rsp.status_code}')
             return 1        # error
@@ -173,6 +191,9 @@ async def download_chara_icon(id_, star):
         logger.error(f'Failed to download {url}. {type(e)}')
         logger.exception(e)
         return 1        # error
+    finally:
+        if rsp is not None:
+            rsp.raw_response.close()
 
 
 class Chara:
@@ -292,17 +313,81 @@ async def download_star6_chara_icon(sess: CommandSession):
     '''
     尝试下载缺失的六星头像，已有头像不会被覆盖
     '''
+    await _download_library_command(sess, (6,))
+
+
+_library_download_lock = threading.Lock()
+
+
+def _icon_is_valid(id_, star):
+    path = R.img(f'priconne/unit/icon_unit_{id_}{star}1.png').path
     try:
-        tasks = []
-        for id_ in _pcr_data.CHARA_NAME:
-            if is_npc(id_):
-                continue
-            res = R.img(f'priconne/unit/icon_unit_{id_}61.png')
-            if not res.exist:
-                tasks.append(download_chara_icon(id_, 6))
-        ret = await asyncio.gather(*tasks)
-        succ = sum(r == 0 for r in ret)
-        await sess.send(f'ok! downloaded {succ}/{len(ret)} icons.')
-    except Exception as e:
-        logger.exception(e)
-        await sess.send(f'Error: {type(e)}')
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+async def download_icon_library(stars=(1, 3, 6), progress=None):
+    """Download missing roster icons with two workers; existing PNGs resume a run."""
+    jobs = asyncio.Queue()
+    for id_ in sorted(_pcr_data.CHARA_NAME):
+        if not is_npc(id_):
+            for star in stars:
+                jobs.put_nowait((id_, star))
+    total = jobs.qsize()
+    counts = {'downloaded': 0, 'existing': 0, 'unavailable': 0, 'failed': 0}
+
+    async def worker():
+        while not jobs.empty():
+            id_, star = jobs.get_nowait()
+            try:
+                if await asyncio.to_thread(_icon_is_valid, id_, star):
+                    counts['existing'] += 1
+                else:
+                    status = await download_chara_icon(id_, star)
+                    counts[{0: 'downloaded', 2: 'unavailable'}.get(status, 'failed')] += 1
+                    await asyncio.sleep(0.5)
+                completed = sum(counts.values())
+                if progress and completed % 100 == 0:
+                    await progress(completed, total)
+            finally:
+                jobs.task_done()
+
+    tasks = [asyncio.create_task(worker()) for _ in range(2)]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return counts
+
+
+async def _download_library_command(sess, stars):
+    if not _library_download_lock.acquire(blocking=False):
+        await sess.send('头像库正在下载，请等待当前任务完成')
+        return
+    try:
+        await sess.send('开始补全当前花名册头像，已有有效图片会跳过；可能需要数分钟。')
+        async def progress(done, total):
+            try:
+                await sess.send(f'头像库进度：{done}/{total}')
+            except Exception as exc:
+                logger.warning('头像下载进度发送失败：%s', exc)
+        counts = await download_icon_library(stars, progress)
+        await sess.send(f"下载完成：新增{counts['downloaded']}，已有{counts['existing']}，"
+                        f"源站无此星级{counts['unavailable']}，失败{counts['failed']}。"
+                        '失败项可再次运行命令补全。')
+        from .arena.old_main import _update_dic
+        await _update_dic.__wrapped__(sess)
+    finally:
+        _library_download_lock.release()
+
+
+@sucmd('download-pcr-icon-library', force_private=False,
+       aliases=('下载完整头像库', '补全头像库'))
+async def download_full_icon_library(sess: CommandSession):
+    await _download_library_command(sess, (1, 3, 6))
