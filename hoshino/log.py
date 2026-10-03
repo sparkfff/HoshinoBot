@@ -3,6 +3,10 @@ from logging.handlers import RotatingFileHandler
 import os
 import sys
 
+# Preserve messages in UTF-8 files even on consoles that cannot print Chinese.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='backslashreplace')
+
 os.makedirs('./log', exist_ok=True)
 _error_log_file = os.path.expanduser('./log/error.log')
 _critical_log_file = os.path.expanduser('./log/critical.log')

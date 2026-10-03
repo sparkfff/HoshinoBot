@@ -76,7 +76,7 @@ class DataSafetyTests(unittest.TestCase):
         for path in ['../res-other/secret', str(root.parent / 'res-other' / 'secret')]:
             with self.assertRaises(ValueError):
                 R.get(path)
-        self.assertEqual(R.get('nested/file').path, str(root / 'nested/file'))
+        self.assertEqual(Path(R.get('nested/file').path).resolve(), (root / 'nested/file').resolve())
 
     def test_resource_rejects_symlink_escape_and_rechecks_existing_object(self):
         from hoshino import R
