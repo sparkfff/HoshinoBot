@@ -2,6 +2,8 @@
 import asyncio
 import sys
 import types
+import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from PIL import Image
@@ -18,6 +20,13 @@ class IconLibraryTests(unittest.TestCase):
             cls.hoshino = hoshino
 
     cleanup_environment = classmethod(test_minimal.MinimalBotTests.cleanup_environment.__func__)
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        resource_patch = patch.object(self.hoshino.config, 'RES_DIR', directory.name)
+        resource_patch.start()
+        self.addCleanup(resource_patch.stop)
 
     def test_download_missing_variants_with_bounded_workers(self):
         from hoshino.modules.priconne import chara
@@ -36,7 +45,8 @@ class IconLibraryTests(unittest.TestCase):
                 patch.object(chara, '_icon_is_valid', side_effect=lambda i, s: (i, s) == (1001, 1)), \
                 patch.object(chara, 'download_chara_icon', side_effect=download):
             result = asyncio.run(chara.download_icon_library())
-        self.assertEqual(result, {'downloaded': 1, 'existing': 1, 'unavailable': 2, 'failed': 2})
+        self.assertEqual(result, {'downloaded': 1, 'existing': 1, 'unavailable': 2,
+                                 'cached_unavailable': 0, 'failed': 2})
         self.assertLessEqual(maximum, 2)
         self.assertEqual(set(calls), {(1001, 3), (1001, 6), (1002, 1), (1002, 3), (1002, 6)})
 
@@ -75,3 +85,42 @@ class IconLibraryTests(unittest.TestCase):
             self.assertFalse(chara._icon_is_valid(1001, 3))
             Image.new('RGB', (128, 128)).save(path)
             self.assertTrue(chara._icon_is_valid(1001, 3))
+
+    def test_404_survives_restart_and_avoids_repeated_requests(self):
+        from hoshino.modules.priconne import chara
+        with patch.object(chara._pcr_data, 'CHARA_NAME', {1001: ['a']}), \
+                patch.object(chara, '_icon_is_valid', return_value=False), \
+                patch.object(chara, 'download_chara_icon', AsyncMock(return_value=2)) as download:
+            first = asyncio.run(chara.download_icon_library((6,)))
+            self.assertEqual(first['unavailable'], 1)
+            download.reset_mock()
+            second = asyncio.run(chara.download_icon_library((6,)))
+            self.assertEqual(second['cached_unavailable'], 1)
+            download.assert_not_awaited()
+            asyncio.run(chara.download_icon_library((6,), retry_missing=True))
+            download.assert_awaited_once()
+
+    def test_failed_download_retried_and_expired_404_rechecked(self):
+        from hoshino.modules.priconne import chara
+        with patch.object(chara._pcr_data, 'CHARA_NAME', {1001: ['a']}), \
+                patch.object(chara, '_icon_is_valid', return_value=False), \
+                patch.object(chara, 'download_chara_icon', AsyncMock(return_value=1)) as download:
+            asyncio.run(chara.download_icon_library((6,)))
+            asyncio.run(chara.download_icon_library((6,)))
+            self.assertEqual(download.await_count, 2)
+            chara._save_missing_icons({'100161': time.time() - chara._MISSING_ICON_TTL - 1})
+            asyncio.run(chara.download_icon_library((6,)))
+            self.assertEqual(download.await_count, 3)
+
+    def test_existing_icons_and_cached_missing_have_no_download_jobs(self):
+        from hoshino.modules.priconne import chara
+        chara._save_missing_icons({'100161': time.time()})
+        progress = AsyncMock()
+        with patch.object(chara._pcr_data, 'CHARA_NAME', {1001: ['a']}), \
+                patch.object(chara, '_icon_is_valid', side_effect=lambda i, s: s in (1, 3)), \
+                patch.object(chara, 'download_chara_icon', AsyncMock()) as download:
+            result = asyncio.run(chara.download_icon_library(progress=progress))
+        self.assertEqual(result['existing'], 2)
+        self.assertEqual(result['cached_unavailable'], 1)
+        progress.assert_awaited_once_with(0, 0)
+        download.assert_not_awaited()

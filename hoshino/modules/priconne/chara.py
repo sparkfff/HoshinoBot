@@ -1,8 +1,10 @@
 import asyncio
 import ast
+import json
 import os
 import tempfile
 import threading
+import time
 from io import BytesIO
 
 import pygtrie
@@ -317,6 +319,40 @@ async def download_star6_chara_icon(sess: CommandSession):
 
 
 _library_download_lock = threading.Lock()
+_MISSING_ICON_TTL = 7 * 24 * 60 * 60
+
+
+def _missing_icon_cache_path():
+    return R.get('avatar_missing.json').path
+
+
+def _load_missing_icons():
+    try:
+        with open(_missing_icon_cache_path(), encoding='utf8') as source:
+            values = json.load(source)
+        if isinstance(values, dict):
+            return {key: timestamp for key, timestamp in values.items()
+                    if isinstance(key, str) and type(timestamp) in (int, float)
+                    and 0 <= time.time() - timestamp < _MISSING_ICON_TTL}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_missing_icons(values):
+    target = _missing_icon_cache_path()
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf8',
+                dir=os.path.dirname(target), suffix='.tmp', delete=False) as output:
+            temporary = output.name
+            json.dump(values, output)
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
 
 
 def _icon_is_valid(id_, star):
@@ -329,27 +365,48 @@ def _icon_is_valid(id_, star):
         return False
 
 
-async def download_icon_library(stars=(1, 3, 6), progress=None):
+async def download_icon_library(stars=(1, 3, 6), progress=None, retry_missing=False):
     """Download missing roster icons with two workers; existing PNGs resume a run."""
+    counts = {'downloaded': 0, 'existing': 0, 'unavailable': 0,
+              'cached_unavailable': 0, 'failed': 0}
+    candidates = [(id_, star) for id_ in sorted(_pcr_data.CHARA_NAME)
+                  if not is_npc(id_) for star in stars]
+    missing = await asyncio.to_thread(_load_missing_icons)
+
+    def scan():
+        pending = []
+        for id_, star in candidates:
+            key = f'{id_}{star}1'
+            if _icon_is_valid(id_, star):
+                counts['existing'] += 1
+                missing.pop(key, None)
+            elif not retry_missing and key in missing:
+                counts['cached_unavailable'] += 1
+            else:
+                pending.append((id_, star))
+        return pending
+
+    pending = await asyncio.to_thread(scan)
     jobs = asyncio.Queue()
-    for id_ in sorted(_pcr_data.CHARA_NAME):
-        if not is_npc(id_):
-            for star in stars:
-                jobs.put_nowait((id_, star))
-    total = jobs.qsize()
-    counts = {'downloaded': 0, 'existing': 0, 'unavailable': 0, 'failed': 0}
+    for item in pending:
+        jobs.put_nowait(item)
+    total = len(pending)
+    if progress:
+        await progress(0, total)
 
     async def worker():
         while not jobs.empty():
             id_, star = jobs.get_nowait()
             try:
-                if await asyncio.to_thread(_icon_is_valid, id_, star):
-                    counts['existing'] += 1
+                status = await download_chara_icon(id_, star)
+                counts[{0: 'downloaded', 2: 'unavailable'}.get(status, 'failed')] += 1
+                key = f'{id_}{star}1'
+                if status == 2:
+                    missing[key] = time.time()
                 else:
-                    status = await download_chara_icon(id_, star)
-                    counts[{0: 'downloaded', 2: 'unavailable'}.get(status, 'failed')] += 1
-                    await asyncio.sleep(0.5)
-                completed = sum(counts.values())
+                    missing.pop(key, None)
+                await asyncio.sleep(0.5)
+                completed = counts['downloaded'] + counts['unavailable'] + counts['failed']
                 if progress and completed % 100 == 0:
                     await progress(completed, total)
             finally:
@@ -363,23 +420,29 @@ async def download_icon_library(stars=(1, 3, 6), progress=None):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(_save_missing_icons, missing)
     return counts
 
 
 async def _download_library_command(sess, stars):
+    argument = getattr(sess, 'current_arg_text', '').strip()
+    if argument not in ('', '重试缺失'):
+        await sess.send('用法：补全头像库；如需重新检查源站缺失项，发送 补全头像库 重试缺失')
+        return
     if not _library_download_lock.acquire(blocking=False):
         await sess.send('头像库正在下载，请等待当前任务完成')
         return
     try:
-        await sess.send('开始补全当前花名册头像，已有有效图片会跳过；可能需要数分钟。')
+        await sess.send('开始检查本地头像，仅下载缺失图片；源站404记录缓存7天。')
         async def progress(done, total):
             try:
-                await sess.send(f'头像库进度：{done}/{total}')
+                await sess.send(f'待下载头像进度：{done}/{total}')
             except Exception as exc:
                 logger.warning('头像下载进度发送失败：%s', exc)
-        counts = await download_icon_library(stars, progress)
+        counts = await download_icon_library(stars, progress, retry_missing=argument == '重试缺失')
         await sess.send(f"下载完成：新增{counts['downloaded']}，已有{counts['existing']}，"
-                        f"源站无此星级{counts['unavailable']}，失败{counts['failed']}。"
+                        f"本次源站404 {counts['unavailable']}，跳过缓存缺失{counts.get('cached_unavailable', 0)}，"
+                        f"失败{counts['failed']}。"
                         '失败项可再次运行命令补全。')
         from .arena.old_main import _update_dic
         await _update_dic.__wrapped__(sess)

@@ -78,7 +78,12 @@ class MinimalBotTests(unittest.TestCase):
         self.assertFalse(self.hoshino.modules.priconne.chara._render_assets)
         self.assertNotIn('matplotlib', sys.modules)
         import nonebot
-        self.assertEqual(nonebot.scheduler.get_jobs(), [])
+        jobs = nonebot.scheduler.get_jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].func.__name__, 'pull_chara')
+        self.assertEqual(str(jobs[0].trigger), "cron[hour='5']")
+        self.assertEqual(jobs[0].trigger.jitter, 300)
+        self.assertEqual(str(jobs[0].trigger.timezone), 'Asia/Shanghai')
 
     def test_server_lifecycle_and_reverse_websocket(self):
         import nonebot
