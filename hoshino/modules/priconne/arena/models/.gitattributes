@@ -1,0 +1,2 @@
+*.onnx binary
+*.json text eol=lf

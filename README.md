@@ -7,7 +7,7 @@
 | 用途 | 指令 | 权限与说明 |
 | --- | --- | --- |
 | 角色别称查询 | `谁是布丁`、`布丁是谁` | 群内查询角色名，支持模糊匹配；头像缺失时尝试下载，下载失败返回文字 |
-| 竞技场查询 | `怎么拆` 后接五个角色名或阵容截图；可加 `b`、`台`、`日` 前缀 | 需要配置 `priconne.arena.AUTH_KEY`，截图识别需要本地头像库，查询结果图片需要绘图资源 |
+| 竞技场查询 | `怎么拆`、`bjjc`、`tjjc`、`rjjc` 后接角色名或阵容截图 | PCRDFans 查询需配置 `priconne.arena.AUTH_KEY`；截图识别需本地头像库；支持 ONNX 候选与 MZQ 模拟 |
 | 重建识图头像库 | `竞技场更新卡池` | 超级用户；从本地角色头像重建识别缓存，不下载图片 |
 | 帮助 | `帮助`、`帮助pcr查询`、`帮助通用` | 显示总帮助和已加载服务的帮助 |
 | 服务列表 | `lssv`、`lssv -a`、`lssv -H` | 群管理员；分别查看普通、全部、隐藏服务 |
@@ -76,7 +76,9 @@ Windows 使用 `.\.venv\Scripts\python.exe run.py`，Linux 使用 `.venv/bin/pyt
 
 ## 添加第三方插件
 
-保留完整的 `hoshino.modules.priconne.arena` 路径及其查询、反馈和图片渲染接口，供其他插件复用。`hoshino/config/priconne.py` 中的 `arena.AUTH_KEY` 用于竞技场 API；渲染查询结果还需 `RES_DIR/img/priconne/gadget/` 下的点赞图标、角色星级/专武素材以及 `msyh.ttc` 字体。缺素材或字体时返回文字结果。查询接口导入时不加载这些图片。点赞/点踩仅保留接口，不注册命令；未实现的上传命令已移除。
+竞技场基于 [Lanly109/arena](https://github.com/Lanly109/arena)，支持多队截图、近似解和分开发送区服命令与截图。保留 `old_main.getBox`、`getPos`、`getUnit` 供其他插件复用，补全头像后仍会重建卡池。`arena.do_query` 改用新版参数 `(id_list, region=1, try_cnt=1)`。
+
+仓库包含 ONNX 模型包。启用模型生成时，在 Bot 的 Python 3.10 环境额外安装 `python -m pip install -r hoshino/modules/priconne/arena/requirements-model.txt`。MZQ 模拟器单独部署，默认连接 `http://127.0.0.1:8080/simulate`；可用 `ARENA_MZQ_URL` 改地址，或设 `ARENA_MZQ_ENABLED=0` 只使用模型候选。设 `ARENA_MODEL_ENABLED=0` 可只查 PCRDFans 和缓存。更多配置见[竞技场部署说明](hoshino/modules/priconne/arena/README.md)。
 
 
 ## 来源与许可证

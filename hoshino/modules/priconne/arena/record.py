@@ -4,12 +4,28 @@ https://github.com/watermellye/arena/blob/master/record.py
 """
 import os
 from pathlib import Path
+from collections import Counter
 import re
 import tempfile
 
 import numpy as np
 from PIL import Image
 from hoshino import R
+
+
+def load_best_attacks():
+    """Rank the frequently used B-server attacks from validated cached results."""
+    from .arena import load_cache_index, load_cached_results
+    attacks = Counter()
+    for key in load_cache_index():
+        if key[-1] not in '12':
+            continue
+        for row in load_cached_results(key):
+            team = tuple(sorted((unit['id'] // 100) * 100 + unit['star'] * 10
+                                for unit in row['atk']))
+            if len(team) == len({unit // 100 for unit in team}) == 5:
+                attacks[team] += 1
+    return [team for team, _ in attacks.most_common(200)]
 
 
 def load_icon_data():
