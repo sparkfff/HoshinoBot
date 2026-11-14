@@ -2,11 +2,11 @@
 
 识图算法移植自 watermellye/arena：
 https://github.com/watermellye/arena/blob/master/old_main.py
-沿用 HoshinoBot 的 GPL-3.0 许可证。仅保留识图及当前查询接口适配，
-不加载该分支的缓存推荐系统或自动定时任务。
+沿用 HoshinoBot 的 GPL-3.0 许可证，查询逻辑采用 Lanly109/arena。
 """
 import base64
 import asyncio
+import re
 from functools import wraps
 import threading
 import time
@@ -18,11 +18,14 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageColor
 import requests
 
-from hoshino import aiorequests, sucmd
-from hoshino.typing import CQEvent, HoshinoBot, Message
+from hoshino import sucmd
+from hoshino.util import filt_message, pic2b64
+from hoshino.typing import CQEvent, HoshinoBot, MessageSegment
 from .. import chara
 from . import sv
-from .record import load_icon_data, update_dic
+from .record import load_icon_data, update_dic, load_best_attacks
+from .query_provider import query_candidates, select_results
+from .result_image import render_result_card, result_text
 
 curpath = dirname(__file__)
 dataDir = join(curpath, 'dic.npy')
@@ -444,12 +447,22 @@ async def _recognize_bytes(body):
         return await getBox(image)
 
 
-async def _QueryArenaTextAsync(text: str, region: int, bot: HoshinoBot, ev: CQEvent):
-    """兼容 old_main 的查询入口，使用当前保留的竞技场后端。"""
-    from . import _arena_query
-    event = CQEvent(dict(ev))
-    event.message = Message(text)
-    await _arena_query(bot, event, region, _skip_limiter=True)
+async def render_atk_def_teams(entries, *, defense_teams=()):
+    def get_character(uid: int):
+        try:
+            return chara.fromid(uid)
+        except (LookupError, ValueError):
+            return None
+
+    def character_name(uid: int) -> str:
+        return getattr(get_character(uid), "name", str(uid))
+
+    return await render_result_card(
+        entries,
+        defense_groups=[[get_character(uid) for uid in team] for team in defense_teams],
+        placeholder=lambda: get_character(1000),
+        character_name=character_name,
+    )
 
 
 async def _QueryArenaImageAsync(image_url: str, region: int, bot: HoshinoBot, ev: CQEvent):
@@ -464,14 +477,316 @@ async def _QueryArenaImageAsync(image_url: str, region: int, bot: HoshinoBot, ev
         await bot.finish(ev, '未识别到阵容，请检查截图及本地头像资源')
     if preview:
         await bot.send(ev, preview)
-    for team in teams:
-        if not team:
+    if len(teams) == 1:
+        await __arena_query(bot, ev, region, teams[0])
+        return
+    if len(teams) > 3:
+        await bot.finish(ev, '请发送含 2 至 3 队防守阵容的对战履历详情截图')
+
+    boxDict = teams
+    best_atk_records = await asyncio.to_thread(load_best_attacks)
+    team_has_result = 0
+    all_query_records = [[] for _ in range(len(boxDict))]
+    '''
+    [
+        [
+            [None, -100, None], # 通配，等待从缓存中获取配队
+            [(第1队第1解),权值,render(渲染该队所需数据)]
+            [(第1队第2解),权值,render]
+        ],
+        [
+            [None, -100, None], # 通配
+            [(第2队第1解),权值,render]
+        ]
+    ]
+    '''
+
+    for query_index, query_team in enumerate(boxDict):
+        all_query_records[query_index].append([None, -100, "placeholder"])
+
+        if len(query_team) < 4 or all(uid == 1000 for uid in query_team):  # 1000 1000 1000 1000 1000 pjjc情况
             continue
-        if len(team) != 5:
-            await bot.send(ev, '已识别部分角色；当前竞技场查询接口需要完整的5人队伍')
+
+        if invalid_defense(query_team):
             continue
-        text = ' '.join(chara.fromid(uid).name for uid in team)
-        await _QueryArenaTextAsync(text, region, bot, ev)
+        records = await __arena_query(bot, ev, region, query_team, raw=1)
+
+        if records == []:
+            continue
+
+        team_has_result += 1
+
+        for record in records:
+            record_team = tuple(chara_obj.id for chara_obj in record['atk'])
+            all_query_records[query_index].append([record_team, record["val"], record])
+
+    if team_has_result == 0 and len(boxDict) == 3:
+        await bot.finish(ev, "均未查询到解法！")
+
+    await generateCollisionFreeTeam(bot, ev, all_query_records, team_has_result, region, boxDict, best_atk_records)  # 最多允许补两队
+
+
+def recommend1Team(already_used_units, best_atk_records):
+    '''
+    already_used_units: [1110,1008,1011,1026,1089] 不可使用的角色id（四位）
+    return : render | "placeholder"
+    '''
+    for record_6 in best_atk_records:  # [111451,101261,110351,103461,103261]
+        record_4 = [x // 100 for x in record_6]  # [1114,1012,1103,1034,1032]
+        team_mix = already_used_units + record_4
+        if len(team_mix) == len(set(team_mix)):  # 推荐配队成功
+            return {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6], "team_type": "frequency"}
+    return "placeholder"
+
+
+def recommend2Teams(already_used_units, best_atk_records):
+    '''
+    return : render, render 或 "placeholder", "placeholder"
+    '''
+
+    try_combinations = []  # [查询1解序号, 查询2解序号, 优先级]
+    for record_1_index in range(len(best_atk_records) - 1):
+        for record_2_index in range(record_1_index + 1, len(best_atk_records)):
+            try_combinations.append([record_1_index, record_2_index, record_1_index + record_2_index])
+    try_combinations = list(sorted(try_combinations, key=lambda x: x[-1]))
+    for try_combination in try_combinations:
+        record_6_1_index = try_combination[0]  # [111451,101261,110351,103461,103261]
+        record_6_1 = best_atk_records[record_6_1_index]
+        record_4_1 = [x // 100 for x in record_6_1]
+
+        record_6_2_index = try_combination[1]
+        record_6_2 = best_atk_records[record_6_2_index]
+        record_4_2 = [x // 100 for x in record_6_2]
+
+        team_mix = already_used_units + record_4_1 + record_4_2
+        if len(team_mix) == len(set(team_mix)):  # 推荐配队成功
+            # print(f'\n\n成功配队{already_used_units}\n{record_4_1}\n{record_4_2}')  # test
+            return {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6_2], "team_type": "frequency"}, {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6_1], "team_type": "frequency"}
+
+    return "placeholder", "placeholder"
+
+
+async def generateCollisionFreeTeam(bot: HoshinoBot, ev: CQEvent, all_query_records, team_has_result, region, boxDict, best_atk_records):
+    '''
+    all_query_records
+    [
+        [
+            [None, -100, "placeholder"], # 通配，等待从缓存中获取配队
+            [(1110,1008,1011,1026,1089), 2.105, render], # [(第1队第1解),权值,render(渲染该队所需数据)]
+            [(1111,1008,1802,1012,1014), 1.152, render] # [(第1队第2解),权值,render]
+        ],
+        [
+            [None, -100, "placeholder"], # 通配
+            [(第2队第1解),权值,render]
+        ]
+    ]
+    '''
+    collision_free_match_cnt = 0
+    outp_render = []
+    collision_free_match_cnt_2 = 0  # 处理三队查询只能两队无冲的情况
+    outp_render_2 = []
+
+    if len(all_query_records) == 2:
+        try_combinations = []  # [查询1解序号, 查询2解序号, 优先级]
+        for query_1_index, query_1_record in enumerate(all_query_records[0]):
+            for query_2_index, query_2_record in enumerate(all_query_records[1]):
+                val = query_1_record[1] + query_2_record[1]
+                try_combinations.append([query_1_index, query_2_index, val])
+        try_combinations = sorted(try_combinations, key=lambda x: x[-1], reverse=True)
+
+        for try_combination in try_combinations:
+            record_1 = all_query_records[0][try_combination[0]]  # [(1110,1008,1011,1026,1089), 2.105, render] # 或通配
+            record_2 = all_query_records[1][try_combination[1]]
+            team_1 = [] if record_1[0] is None else list(record_1[0])  # (1110,1008,1011,1026,1089)
+            team_2 = [] if record_2[0] is None else list(record_2[0])
+            team_mix = team_1 + team_2  # list
+            if len(team_mix) != len(set(team_mix)):  # 存在冲突
+                continue
+
+            succ = False
+            val = try_combination[-1]
+            if val < -250:
+                break
+            if val < -150:  # 已有0队，要补2队 # 只会出现一次
+                team_recommend_1, team_recommend_2 = recommend2Teams(team_mix, best_atk_records)
+                if team_recommend_1 == "placeholder" or team_recommend_2 == "placeholder":
+                    continue
+                record_1[-1] = team_recommend_1
+                record_2[-1] = team_recommend_2
+                succ = True
+            elif val < -50:  # 已有1队，要补1队
+                team_recommend = recommend1Team(team_mix, best_atk_records)
+                if team_recommend == "placeholder":
+                    continue
+                if team_1 == []:
+                    record_1[-1] = team_recommend
+                if team_2 == []:
+                    record_2[-1] = team_recommend
+                succ = True
+            else:  # 已有2队
+                succ = True
+
+            if succ:
+                collision_free_match_cnt += 1
+                outp_render += [record_1[-1], record_2[-1], []]
+                if collision_free_match_cnt >= 8:
+                    break
+
+    if len(all_query_records) == 3:
+        try_combinations = []  # [查询1解序号, 查询2解序号, 查询3解序号, 优先级]
+        for query_1_index, query_1_record in enumerate(all_query_records[0]):
+            for query_2_index, query_2_record in enumerate(all_query_records[1]):
+                for query_3_index, query_3_record in enumerate(all_query_records[2]):
+                    val = query_1_record[1] + query_2_record[1] + query_3_record[1]
+                    try_combinations.append([query_1_index, query_2_index, query_3_index, val])
+        try_combinations = sorted(try_combinations, key=lambda x: x[-1], reverse=True)
+
+        for try_combination in try_combinations:
+            record_1 = all_query_records[0][try_combination[0]]  # [(1110,1008,1011,1026,1089), 2.105, render] # 或通配
+            record_2 = all_query_records[1][try_combination[1]]
+            record_3 = all_query_records[2][try_combination[2]]
+            team_1 = [] if record_1[0] is None else list(record_1[0])  # (1110,1008,1011,1026,1089)
+            team_2 = [] if record_2[0] is None else list(record_2[0])
+            team_3 = [] if record_3[0] is None else list(record_3[0])
+            team_mix = team_1 + team_2 + team_3  # list
+            if len(team_mix) != len(set(team_mix)):  # 存在冲突
+                continue
+
+            succ = False
+            val = try_combination[-1]
+            if val < -250:
+                break
+            if val < -150:  # 已有1队，要补2队
+                team_recommend_1, team_recommend_2 = recommend2Teams(team_mix, best_atk_records)
+                if team_recommend_1 == "placeholder" or team_recommend_2 == "placeholder":
+                    continue
+                if team_1 != []:
+                    record_2[-1] = team_recommend_1
+                    record_3[-1] = team_recommend_2
+                if team_2 != []:
+                    record_3[-1] = team_recommend_1
+                    record_1[-1] = team_recommend_2
+                if team_3 != []:
+                    record_1[-1] = team_recommend_1
+                    record_2[-1] = team_recommend_2
+                succ = True
+            elif val < -50:  # 已有2队，要补1队 # 此时已有两队无冲
+                team_recommend = recommend1Team(team_mix, best_atk_records)
+                if team_recommend == "placeholder":
+                    collision_free_match_cnt_2 += 1
+                    outp_render_2 += [record_1[-1], record_2[-1], record_3[-1], []]
+                else:
+                    if team_1 == []:
+                        record_1[-1] = team_recommend
+                    if team_2 == []:
+                        record_2[-1] = team_recommend
+                    if team_3 == []:
+                        record_3[-1] = team_recommend
+                    succ = True
+            else:  # 已有3队
+                succ = True
+
+            if succ:
+                collision_free_match_cnt += 1
+                outp_render += [record_1[-1], record_2[-1], record_3[-1], []]
+                # print(f'当前无冲配队数={collision_free_match_cnt} len(outp_render)={len(outp_render)}')  # test
+                if collision_free_match_cnt >= 6:
+                    break
+
+    if collision_free_match_cnt:
+        # print(f'\n\n总共无冲配队数={collision_free_match_cnt} len(outp_render)={len(outp_render)}')  # test
+        await bot.finish(ev, await format_results(outp_render[:-1], boxDict))
+    elif collision_free_match_cnt_2:
+        await bot.finish(ev, await format_results(outp_render_2[:-1], boxDict))
+    else:
+        if len(all_query_records) == 2:  # 查两队
+            if team_has_result == 0:
+                await bot.finish(ev, "均未查询到解法！")
+            elif team_has_result == 1:
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await bot.send(ev, f"仅第{index+1}队查询到解法！")
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+            else:  # 2队有结果，但凑不满2队无冲
+                await bot.send(ev, "无冲配对失败，返回单步查询结果")
+                for index, records in enumerate(all_query_records):
+                    await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+        else:  # 查三队
+            if team_has_result == 1:
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await bot.send(ev, f"仅第{index+1}队查询到解法！")
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+            else:  # 2~3队有结果，但凑不满2队无冲
+                await bot.send(ev, "无冲配对失败，返回单步查询结果")
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+
+
+async def _QueryArenaTextAsync(text: str, region: int, bot: HoshinoBot, ev: CQEvent):
+    defen = re.sub(r'[?？，,_]', '', text)
+    defen, unknown = chara.roster.parse_team(defen)
+    if unknown:
+        _, name, score = chara.guess_id(unknown)
+        if score < 70 and not defen:
+            return  # 忽略无关对话
+        unknown = filt_message(unknown)
+        msg = f'无法识别"{unknown}"' if score < 70 else f'无法识别"{unknown}" 您说的有{score}%可能是{name}'
+        await bot.finish(ev, msg)
+    await __arena_query(bot, ev, region, defen)
+
+def invalid_defense(team):
+    known = [uid for uid in team if uid != 1000]
+    return (not 4 <= len(team) <= 5 or len(set(known)) != len(known)
+            or any(chara.is_npc(uid) for uid in known))
+
+
+async def __arena_query(bot, ev: CQEvent, region: int, defen, raw=0, only_use_cache=False):
+    if len(defen) > 5:
+        await bot.finish(ev, '编队不能多于5名角色', at_sender=True)
+    if len(defen) < 4:
+        await bot.finish(ev, '编队角色过少', at_sender=True)
+    if len(defen) != len(set(defen) - {1000}) + defen.count(1000):
+        await bot.finish(ev, '编队中含重复角色', at_sender=True)
+    if any(chara.is_npc(i) for i in defen if i != 1000):
+        await bot.finish(ev, '编队中含未实装角色', at_sender=True)
+
+    defense_ids = tuple(defen)
+    res = await query_candidates(defen, region, only_use_cache)
+    notices = getattr(res, "notices", [])
+    if notices:
+        await bot.send(ev, "\n".join(notices))
+
+    defen = [chara.fromid(x).name for x in defen]
+    defen = f"防守方【{' '.join(defen)}】"
+
+    # 处理查询结果
+    if not res:
+        if not raw:
+            await bot.finish(ev, f'{defen}\n未查询到解法')
+        else:
+            return []
+
+    if raw:
+        return select_results(res, 24)  # At most25^3 PJJC combinations, including each placeholder.
+
+    # 发送回复
+    res = select_results(res, 10)  # Preserve database rows and a few model rows on simulation degradation.
+    await bot.send(ev, defen + '\n' + await format_results(res, (defense_ids,)))
+
+
+async def format_results(rows, defense_teams):
+    from . import render_atk_def_teams as render
+    try:
+        with await render(rows, defense_teams=defense_teams) as image:
+            return str(MessageSegment.image(pic2b64(image)))
+    except (OSError, ValueError, UnicodeError) as exc:
+        sv.logger.warning('竞技场结果绘图失败，改用文字：%s', exc)
+        return '图片资源不可用，以下为文字结果：\n' + '\n'.join(
+            ' '.join(c.name for c in row['atk']) + ' ' + result_text(row)
+            if isinstance(row, dict) else '未知阵容' if row == 'placeholder' else ''
+            for row in rows)
 
 
 @sucmd('竞技场更新卡池', force_private=False)

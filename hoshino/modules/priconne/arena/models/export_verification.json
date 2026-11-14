@@ -1,0 +1,33 @@
+{
+  "generator": {
+    "batches": [
+      1,
+      7,
+      32
+    ],
+    "all_five_prefix_lengths": true,
+    "fixed_padding_matches_original_causal_prefix": true,
+    "compared_logits": 63400,
+    "max_absolute_error": 4.76837158203125e-06
+  },
+  "critic": {
+    "batches": [
+      1,
+      7,
+      32
+    ],
+    "max_absolute_error": 1.1920928955078125e-06,
+    "note": "Six time/outcome bins from ORIGINAL progression; not calibrated for refreshed labels"
+  },
+  "verified": true,
+  "source_hashes_unchanged": true,
+  "source_hashes": {
+    "generator_checkpoint": "6c60f55e184cd5e0c60ef0196bb86b6693dcf45a41b5eb01bf3755e8a4e786b4",
+    "master_database": "f1df74139d63a308c8e8a8028164289b55fe041c06df23642eb3ae7088652ddf",
+    "critic_checkpoint": "191f9232b3d472a9e5bfd610c900ed2e2bd5841668a35b92bd2753f9576cfd5d"
+  },
+  "torch": "2.13.0",
+  "onnx": "1.19.1",
+  "onnxruntime": "1.23.2",
+  "cuda_initialized": false
+}

@@ -227,30 +227,31 @@ class MinimalBotTests(unittest.TestCase):
     def test_arena_query_interface(self):
         from hoshino.modules.priconne.arena import arena
         from hoshino import aiorequests
-        response = types.SimpleNamespace(json=AsyncMock(return_value={
+        response = types.SimpleNamespace(raise_for_status=lambda: None,
+            raw_response=types.SimpleNamespace(close=lambda: None), json=AsyncMock(return_value={
             'code': 0, 'data': {'result': [{
                 'id': '123456', 'atk': [{'id': 100101, 'star': 3, 'equip': 0}],
                 'def': [], 'up': 1, 'down': 0}]}}))
-        with patch.object(aiorequests, 'post', AsyncMock(return_value=response)) as post:
-            entries = asyncio.run(arena.do_query([1001, 1002, 1003, 1004, 1005], 301, 2))
+        with tempfile.TemporaryDirectory() as cache, patch.object(arena, '_gs_data_dir', Path(cache)), \
+                patch.object(aiorequests, 'post', AsyncMock(return_value=response)) as post:
+            team = [1001, 1002, 1003, 1004, 1005]
+            entries = asyncio.run(arena.do_query(team, 2))
+            cached = asyncio.run(arena.do_query(team, 2, -1))
+        post.assert_awaited_once()
         self.assertEqual(post.await_args.kwargs['json']['region'], 2)
         self.assertEqual(post.await_args.kwargs['json']['def'][0], 100101)
         self.assertEqual(entries[0]['atk'][0].id, 1001)
-        self.assertEqual(len(entries[0]['qkey']), 5)
+        self.assertEqual(cached[0]['atk'][0].id, 1001)
 
     def test_arena_render_interface(self):
-        from PIL import Image, ImageFont
-        from hoshino import R
+        from PIL import Image
         from hoshino.modules.priconne import arena
         icon = Image.new('RGBA', (64, 64), 'white')
         entry = {'atk': [types.SimpleNamespace(render_icon=AsyncMock(return_value=icon))],
-                 'qkey': 'ABCDE', 'user_like': 0, 'up': 1, 'down': 0,
-                 'my_up': 0, 'my_down': 0}
-        font = ImageFont.load_default()
-        with patch.object(R.ResImg, 'open', return_value=icon), patch.object(
-                ImageFont, 'truetype', return_value=font):
-            result = asyncio.run(arena.render_atk_def_teams([entry]))
-        self.assertEqual(result.size, (420, 64))
+                 'team_type': 'normal', 'up': 1, 'down': 0}
+        with asyncio.run(arena.render_atk_def_teams([entry])) as result:
+            self.assertGreaterEqual(result.width, 800)
+            entry['atk'][0].render_icon.assert_awaited_once()
 
     @contextmanager
     def _recognition_library(self, count=5):

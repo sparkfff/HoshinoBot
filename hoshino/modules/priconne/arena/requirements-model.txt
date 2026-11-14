@@ -1,0 +1,2 @@
+# Runtime only. Torch/onnx are needed solely by the separate offline exporter.
+onnxruntime>=1.18,<1.24
